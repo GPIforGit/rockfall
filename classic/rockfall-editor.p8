@@ -1,0 +1,1386 @@
+pico-8 cartridge // http://www.pico-8.com
+version 42
+__lua__
+--rockfall editor
+--  by gpi
+
+--[[
+ < lshift+right prev cave
+ > lshift+left next cave
+ l change level
+ tab parameter view
+ 0-9 ,.*/ select block
+ - lshift+up prev line
+ + lshift+down next line
+ c sprite/boxmode
+ return edit line
+ shift+p set point: block,x,y
+ p insert point
+ shift+l set line: block,x1,y1,x2,y2
+ l insert line
+ shift+f set filled: rect block,block,x1,y1,x2,y2
+ f insert fill
+ shift+g set filled1: rect1 block,x1,y1,x2,y2
+ g insert filled1
+ shift+b set box: block,x1,y1,x2,y2
+ b insert box
+ shift+r set raster: block,x,y,w,h,dx,dy
+ r insert raster
+ shift+a set add: block,block,dx,dy
+ a insert add
+ shift+d delete line
+ shift+s save
+ shift+t test
+ shift+z demo
+ shift+u record demo
+ shift+m switch between map-data-mode (needs more space) and list-data-mode (compact bd1&2-style)
+ lmb set start
+ rmb set end
+
+ ctrl+c copy current cave (as text-string)
+ ctrl+v overwrite current cave with clipboard
+ ctrl+x cut cave
+ ctrl+i insert cave
+ ctrl+n new cave at the end
+
+amoeba - geschwindigkeit start kontrollieren! - Boring?
+
+--]]
+
+editor=true
+
+--base
+#include rockfall-game.p8:0
+--game
+#include rockfall-game.p8:1
+--cave
+#include rockfall-game.p8:3
+
+global[[
+compareignoreheader={
+name=true
+intermission=true
+loopx=true
+loopy=true
+needed=true
+time=true
+amoeba_time=true
+amoeba_slow=true
+amoeba_fast=true
+amoeba_limit=true
+magicwalltime=true
+slime_permeability=true
+map=true
+demo=true
+}
+]]
+
+if (dget(63)==0) global "reload(0,0,0x4300,rockfall-game.p8)"
+-->8
+--inextro
+
+init_caveintro=prepare_cave
+
+
+function update_caveintro() 
+ if (phase==0) wait-=1
+ if (wait < -3) change_gamemode "game"
+
+ sprite_handle()
+ cave_gamelogic()
+end
+
+function draw_caveintro()
+ draw_cave()
+end
+
+function init_caveexit()
+ setinfo("time:"..timer.." ◆:"..ply_gems)
+ change_gamemode "editor"
+end
+
+-->8
+--editor
+
+
+function addpoke(...)
+ if(_adr<0x3000)poke(_adr,...)
+ _adr+=#{...}
+end
+
+function cave_len()
+ return cave.ismap and mapheadersize or #header + #cave
+end
+
+function cave_str(l)
+ if (l<0 or l>cave_len()) return "","",{}
+ if (l<=#header) local h=header[l][1] return h,tstr(cave[h]),cave[h]
+ l-=#header
+ return cave[l][1],tstr(tsub(cave[l],2)),cave[l]
+end
+
+function cave_new()
+ global[[
+cave={
+name=cave
+size=40,22
+intermission=false
+needed=1,2,3,4,5
+time=120,110,100,90,80
+amoeba_time=60
+amoeba_slow=8
+amoeba_fast=64
+amoeba_limit=200
+magicwalltime=30
+player=1,0,2,0
+seed={}
+slime_permeability=32
+random=vOID,0,vOID,0,vOID,0,vOID,0
+ismap=false
+map={}
+loopx=false
+loopy=false
+}
+scx=nil
+scy=nil
+]]
+ for i=1,5 do add(cave.seed,rnd(256)\1) end
+end
+
+
+function cave_write()
+ 
+ local flag=cave_flag_valid
+ for f,v in pairs(cave_flags) do
+  if (cave[f]) flag|=v
+ end
+ addpoke(flag)
+ 
+ for i=1,cave_len() do
+  --local n,v,t,index
+  if i<=#header then
+   n=header[i]
+   v=n[1]
+   t,index=cave[v],2
+  else
+   v=i-#header
+   n,t,index=lines[ cave[v][1] ],tsub(cave[v],2),3
+   addpoke(n[1]*16+ block2id[block[t[1]]])
+  end 
+
+  local typ=type(n[index])  
+  
+  if typ=="string" then   
+   addpoke(ord(t,1,#t-1))
+   addpoke(ord(t,#t)|0x80)
+   
+  elseif typ=="boolean" then
+   --addpoke(t and 1)
+  else
+   if (type(t)=="string") t=block[t]
+   if (tonum(t)) t={t}
+   for i=index,#n do
+    local x=t[i-1]
+    if (not tonum(x)) x=x and block[x] or n[i]
+    addpoke(x)
+   end    
+  end
+  
+ end
+ 
+ if cave.ismap then
+  _adr-=0.5
+  for c in all(cave.map) do
+   write(c)
+  end
+  
+  _adr=ceil(_adr)
+ else
+  addpoke(0)
+ end
+ 
+ for n in all(cave.demo) do
+  addpoke(demomove[n[1]]+n[2]*demodiv)
+ end
+ addpoke(0)
+ 
+end
+
+function cave_copy()
+ local str=""
+ for i=1,cave.ismap and mapheadersize or #header do
+  local h=header[i] 
+  str..=h[1].."="..tstr(cave[h[1]]).."\n"
+ end
+ if cave.ismap then
+  for y=0,gameh1 do
+   for x=0,gamew1 do
+    str..= block2ascii[mget(x,y)]
+   end
+   str..="\n"
+  end
+ else
+  for e in all(cave) do
+   str..=tstr(e).."\n"
+  end
+
+ end
+
+ printh(str,"@clip")
+ setinfo"copy cave"
+end
+
+function cave_paste()
+ local t,b=table(stat(4) or "")
+ for i,h in pairs(header) do
+  if (t[h[1]]==nil) b=i break
+ end
+
+ if b==mapheadersize+1 then
+  t.ismap,t.map=true,{}
+  for li=2,#t-1 do
+   local l=t[li]
+   for c=2,#l-1 do
+    add(t.map,block2id[ block2ascii[sub(l,c,c)] or 0])
+   end
+  end 
+  while #t>0 do
+   deli(t,1)
+  end  
+  
+ elseif b then
+  setinfo "illegal format" 
+  return false
+ end 
+ caves[currentcave],cave=t,t 
+ 
+ render()
+ cave_compress()
+ 
+end
+
+
+
+function caves_store()
+ global[[
+_adr=0x1000
+cs_oldcave=@cave
+]]
+ 
+
+ for c in all(caves) do
+  cave=c
+  cave_write()
+ end
+ global[[
+addpoke(0)
+addpoke(0)
+cstore(0x1000,0x1000,0x2000)
+dset(63,1)
+cave=@cs_oldcave
+]]
+ setinfo(_adr-0x1000 .." bytes ("..ceil((_adr-0x1000)/0x2000*100)..")%")
+end
+
+
+
+function init_editorstart()
+ global[[
+zoom=5
+camx=0
+camy=0
+cx=0
+cy=0
+showsprite=@TRUE
+curline=1
+currentcave=@startcave
+level=1
+poke(0x5f2d,0x1)
+change_gamemode(editor)
+]]
+end
+
+function exit_editor()
+ global[[
+poke2(0x5f5c,0)
+]]
+end
+
+function init_editor()
+ cave=caves[currentcave] 
+ global[[
+render()
+esel=1
+addline=0
+oldcave=@currentcave
+record=@FALSE
+demo=@FALSE
+oldcavedata={}
+curblock=@block_void
+oldismap=@FALSE
+savemap=@FALSE
+poke2(0x5f5c,0x010e)
+pal(@colors.1,1)
+clearkeys=true
+eheader="pLEASE WAIT..."
+eline=""
+etable={}
+]]
+ 
+end
+
+function comparecopy(t,oldt,dif)
+ if (not oldt or #t != #oldt) oldt={}
+ dif=dif or #t!=#oldt
+
+ for k,v in pairs(t) do
+  if not compareignoreheader[k] then
+   if type(v)=="table" then
+    dif,oldt[k]=comparecopy(v,oldt[k],dif)
+
+   elseif v!=oldt[k] then
+    oldt[k],dif=v,true
+   end
+  end
+ end
+ 
+ return dif,oldt
+end
+
+function render()
+ cave_render()
+ gems=0
+ butterflys=0
+ for x=1,gamew1 do
+  for y=1,gameh1 do
+   local t=mget(x,y)
+   if (mget(x,y)==block_gem) gems+=1
+   if (mget(x,y)==block_butterfly) butterflys+=1
+  end
+ end
+end
+
+function update_editor()
+ key,wheel,mb,mx,my=stat(30) and stat(31),stat(36),stat(34),stat(32),stat(33)
+ cx,cy=mx\zoom+camx,my\zoom+camy
+ 
+ if key or mb!=0 then
+  global[[
+btnp⬇️=false
+btnp⬆️=false
+btnp⬅️=false
+btnp➡️=false
+  ]]
+ else
+  btnp⬇️,btnp⬆️,btnp⬅️,btnp➡️=btnp(⬇️),btnp(⬆️),btnp(⬅️),btnp(➡️)
+  if (btnp(❎)) key="del"
+  if (btnp(🅾️)) key="ins"
+  if (btn(4,1)) key="shift"
+ end
+ 
+ if(btn(6)) poke(0x5f30,1) key=key or "\r"
+
+ 
+ clearkeys= clearkeys and (btn()!=0 or key or mb!=0)
+ if (clearkeys) return false
+ 
+ if listview then
+  if (btnp⬆️) curline-=1
+  if (btnp⬇️) curline+=1
+  if (key=="\9") listview=false
+  if curline>=#header then
+   if (key=="\200" and copyline) add(cave,tcpy(copyline),curline-#header)
+   if (key=="\215") copyline=tcpy(cave[curline-#header]) deli(cave,curline-#header) 
+   if (key=="\194") copyline=tcpy(cave[curline-#header])
+   if (key=="\213") cave[curline-#header] = tcpy(copyline)
+  end
+
+  
+ elseif not inputmode then 
+  if (key=="+" or (key=="shift" and btnp⬇️)) curline+=1
+  if (key=="-" or (key=="shift" and btnp⬆️)) curline-=1
+  if (key==">" or (key=="shift" and btnp➡️)) currentcave+=1
+  if (key=="<" or (key=="shift" and btnp⬅️)) currentcave-=1
+  
+  
+  if (key=="\200") cave_new() add(caves,cave,currentcave) cave_paste()
+  if (key=="\215") cave_copy() del(caves,cave) oldcave=nil
+  
+  if (key=="\205" or #caves<=0) cave_new() add(caves,cave) currentcave=#caves
+  
+  --if (key=="⬇️" and curline>#header) del(cave,etable) clearkeys=true
+  if (key=="\213") cave_paste()
+  if (key=="\194") cave_copy()
+  if (key=="d") level=level%5+1
+  if (key=="c") showsprite=not showsprite
+  if (key=="\9") listview,epos,listy=true,#eline+1,0
+  
+  if (key=="★") cave_compress() caves_store() cstore() oldcave=currentcave
+  if (key=="⧗") change_gamemode "gamestart" return false
+  if (key=="⬆️") record=true change_gamemode "gamestart" return false
+  if (key=="▥") demo=true change_gamemode "gamestart" return false
+
+  if (key=="\r" and eheader!="" ) inputmode,epos,key=true,#eline+1
+
+  if curline>=#header then
+   if (defline[key]) cave[curline-#header]=tcpy(defline[key]) inputmode,key,overwriteeline=true,"\r",eline
+   if (defnewline[key]) curline=min(curline+1,cave_len()+1) add(cave,tcpy(defnewline[key]),curline-#header)
+   if (key=="ins") add(cave,tcpy(defline["⬅️"]),curline-#header) cleareline=true
+   if (key=="del") del(cave,etable) oldline=nil
+  end  
+
+  if key=="😐" then    
+   if cave.ismap then 
+    cave_new()
+    caves[currentcave]=cave
+   else
+    cave_compress()   
+   end
+   cave.ismap=not cave.ismap
+  end
+  
+  
+  if (key=="shift" and wheel>0) zoom+=1
+  if (key=="shift" and wheel<0) zoom-=1  
+  zoom=mid(2,8,zoom)
+  
+  if not key then
+   if (btnp⬅️) camx-=1
+   if (btnp➡️) camx+=1
+   if (btnp⬆️) camy-=1
+   if (btnp⬇️) camy+=1    
+  end
+  if (key=="shift" and mb==1) or mb==4 then
+   if (scx)camx+=scx-mx\zoom 
+   if (scy)camy+=scy-my\zoom
+   scx,scy=mx\zoom,my\zoom
+  else
+   scx,scy=nil
+  end
+  
+  camx=mid(camx,0,max(0,gamewidth-128\zoom))
+  camy=mid(camy,0,max(0,gameheight-114\zoom)) 
+ end
+ 
+ currentcave=mid(1,#caves,currentcave)
+ if currentcave!=oldcave  or oldismap!=cave.ismap or level!=oldlevel then
+  if (currentcave!=oldcave and cave.ismap) cave_compress()
+  setinfo("cave "..level.."-"..currentcave.. " "..(cave.ismap and "map" or "list"))
+  cave=caves[currentcave]
+  global[[
+oldcave=@currentcave
+oldismap=@cave.ismap
+oldlevel=@level
+oldcavedata={}
+]]
+ end
+ 
+ dif,oldcavedata=comparecopy(cave,oldcavedata)
+ if (dif) render() oldline=nil
+ 
+ curline,addline=mid(curline+addline,1,cave_len()+1),0
+ if curline!=oldline or clearline then
+  eheader,eline,etable=cave_str(curline) 
+  oldline,eline,overwriteeline=curline,overwriteeline or eline
+  if (cleareline) eline,cleareline="",false
+ end
+ 
+ if (curline>cave_len()) eline,etable="",{}
+ 
+
+ 
+ if inputmode or listview then
+  
+  
+  if (btnp⬅️) epos-=1
+  if (btnp➡️) epos+=1
+  epos=mid(1,epos,#eline+1)
+  
+ if (eheader=="name") nkey=keytrans[key] or key else nkey=key
+  
+  if key then
+   if key=="del" then
+    eline=sub(eline,1,epos-1)..sub(eline,epos+1)
+   elseif #nkey==1 and nkey>=" " and nkey<="\127" and eheader!="" then
+    eline=sub(eline,1,epos-1)..nkey..sub(eline,epos)
+    epos+=1
+   elseif key=="\8" and epos>1 then
+    eline=sub(eline,1,epos-2)..sub(eline,epos)
+    epos-=1
+    
+   elseif key=="\r" then
+    if type(cave[eheader])=="boolean" then
+     cave[eheader]=eline=="true"
+    elseif eheader=="name" then
+     cave.name=eline
+    elseif tonum(etable) then
+     cave[eheader]=mid(0,255,tonum(eline) or cave[eheader])
+    else
+     local t,off=split(eline), curline<=#header and 0 or 1
+     for nb=1+off,#etable do
+      local x=t[nb-off]
+      if(tonum(x)) x=mid(0,255,x)
+      if (type(x)==type(etable[nb])) etable[nb]=(x and tonum(block[x])) and block[block[x]] or tonum(x) or etable[nb]
+     end
+    end
+    
+   if (listview) addline=1 else inputmode=false
+
+    oldline=nil    
+   end
+  end
+  
+ elseif cave.ismap then
+  local kb=kblock[key]
+  if (kb) curblock=block[kb]
+  if (key!="shift" and wheel!=0) curblock=block[kblock[limit(kblock[block[curblock]]+wheel,0,#kblock)]]
+  
+  if mb==1 then
+   if eheader=="player" then
+    cave.player[1],cave.player[2]=cx,cy
+   elseif mget(cx,cy)!=curblock then
+    if cx>=1 and cy>=1 and cx<=gamew2 and cy<=gameh2 then
+     mset(cx,cy,curblock)
+     savemap=true
+    end
+   end  
+  end
+  if mb==2 then
+   if eheader=="player" then
+    cave.player[3],cave.player[4]=cx,cy
+   else
+    curblock=mget(cx,cy)
+   end
+  end
+  
+  if (mb==0 and savemap) cave_compress() savemap=false render()
+  
+  
+ else
+  
+  local headerinfo=blockeheader[eheader]
+  
+  if key then
+   
+   
+   local kb=kblock[key]
+   if kb then
+    
+    if headerinfo==1 then
+     etable[2]=kb
+    elseif headerinfo==2 then
+     etable[1+esel]=kb
+    elseif headerinfo==3 then
+     cave.random[esel*2-1]=kb
+    end
+   end
+   
+   if key==" " or kb then
+    if headerinfo==2 then
+     esel=esel%2+1
+    elseif headerinfo==3 then
+     esel=esel%4+1
+    else
+     esel=1
+    end
+   end
+   
+  end
+  
+  
+  
+  if mb==1 then
+   local headerinfo=coordinateheader[eheader]
+   if eheader=="player" then
+    cave.player[1],cave.player[2]=cx,cy     
+   elseif headerinfo==1 then
+    etable[3],etable[4]=cx,cy
+   elseif headerinfo==2  then
+    etable[4],etable[5]=cx,cy
+   end
+   
+  elseif mb==2 then
+   local headerinfo=coordinat2eheader[eheader]
+   if eheader=="player" then
+    cave.player[3],cave.player[4]=cx,cy     
+   elseif headerinfo==1 then
+    etable[5],etable[6]=cx,cy
+   elseif headerinfo==2 then
+    etable[6],etable[7]=cx,cy
+   end 
+   
+  end
+  
+ end
+ 
+ 
+ 
+ 
+end
+
+function box(x,y,c)
+ if (not x) return false
+ fillp(0x5a5a.0)
+ 
+ rect(x*zoom-1,y*zoom-1,x*zoom+zoom,y*zoom+zoom,c|0xe0)
+ 
+ fillp()
+-- for i in all({-1,1,0}) do
+--  rect(x*zoom-2+i,y*zoom-2+i,x*zoom+zoom+1-i,y*zoom+zoom+1-i,i==0 and c or 14)
+-- end
+end
+
+function draw_editor()
+
+ local ix,iy=0,121
+ 
+ if listview then
+  local y=listy
+  for i=1,cave_len()+1 do
+   local a,b=cave_str(i)
+   x=print((headertrans[a] or a)..":"..(i==1 and level.."-"..currentcave or ""),0,y,5)+1
+  if (i==curline) ix,iy=x-1,y else print(b,x,y,7)
+   y+=7
+  end
+  
+  if iy<=12 then
+   listy+=7
+  elseif iy>=120 then
+   listy-=(iy-113)\7*7
+  end
+  listy=mid(0,listy,min(0,-cave_len()*7+122))
+  
+ else
+  camera(camx*zoom,camy*zoom) 
+  for y=0,gameh1 do
+   yy=y*zoom
+   for x=0,gamew1 do
+    xx=x*zoom
+    t=mget(x,y)
+    if showsprite and zoom>2 then
+     
+     if t>0 then
+     if (zoom<=6) t,z=z5spr[t],5 else z=8
+      sspr(t%16*8,t\16*8,z,z, xx,yy,zoom,zoom)
+     end
+     
+    else
+     if (ecol[t]) rectfill(xx,yy,xx+zoom-1,yy+zoom-1,ecol[t])
+    end
+   end
+  end
+  
+  box(cx,cy,1)
+
+  local x1,y1,x2,y2
+  if header_x2y2[eheader] then
+   _,_,x1,y1,x2,y2=unpack(etable)
+  elseif eheader=="player" then
+   x1,y1,x2,y2=unpack(etable)
+  elseif eheader=="rect" then
+   _,_,_,x1,y1,x2,y2=unpack(etable)
+  elseif eheader=="raster" then
+   _,_,x1,y1=unpack(etable)
+  end
+  
+  if(x1)box(x1,y1,15)
+  if(y1)box(x2,y2,2)
+
+  camera()
+  
+  
+
+  printo(curline..":"..(headertrans[eheader] or eheader),0,128-7-7,5)
+
+
+  printor("◆"..gems.." x"..butterflys,127,128-7-7,6)
+  
+ end
+ 
+ if (not listview and eheader=="name") ix=printo(level.."-"..currentcave,ix,iy,5)
+ 
+ if inputmode or listview then
+  clip(ix-1,iy-1,128,128)
+  local x=print(sub(eline,1,epos-1),0,0x8000)
+  local xx=min(0,116-ix-x)+ix
+  printo(eline,xx+1,iy,10)
+  line(xx+x,iy,xx+x,iy+6,8)
+  clip()
+ else
+  
+  printo(eline,ix+1,iy,7)
+  if eheader=="raster" or eheader=="all" or eheader=="rect" or eheader=="line" or eheader=="box" or eheader=="point" or eheader=="rect1" then
+   local a,b=findx(eline,",",esel-1)+ix,findx(eline..",",",",esel)+ix-3
+   line(a,iy+6,b,iy+6,2)
+  elseif eheader=="random" then
+   local a,b=findx(eline,",",esel*2-2)+ix,findx(eline..",",",",esel*2-1)+ix-3
+   line(a,iy+6,b,iy+6,2)
+  end
+  
+
+  if cave.ismap then
+   t=z5spr[curblock]
+   rectfill(mx+2,my+5,mx+8,my+11,14)
+   if (t) sspr(t%16*8,t\16*8,5,5, mx+3,my+6,5,5)    
+  end
+  
+--  local fn=mx>64 and printor or printo
+--  fn(tostr(block[mget(cx,cy)]).." "..cx.." "..cy,mx+6,my+7,7)
+ end
+ 
+ if infotxt and infotimer then
+  printor(infotxt,127,121,8)
+  infotimer-=1
+  if (infotimer<=0) infotxt,infotimer=nil
+ end  
+ 
+ spr(23,mx,my)
+
+end
+
+
+function setinfo(txt)
+ infotxt,infotimer=txt,120
+ printh(txt)
+end
+
+-->8
+--test
+function findx(str,f,c)
+ if (not c or c<=0) return 0
+ for nb=1,#str do
+  if sub(str,nb,nb)==f then
+   c-=1
+   if (c<=0) return print(sub(str,1,nb),0,0x8000)
+  end  
+ end
+ return print(str,0,0x8000)
+end
+
+
+
+global[[
+
+z5spr={
+--gem = yellow
+3=15
+--player = skin
+5=25
+--exit = 
+19=47
+--firefly=
+7=14
+--amoeba =
+8=27
+--butterfly=
+9=13
+--magicwall=
+22=44
+--slime=
+11=63
+--dirt=
+16=29
+--metal=
+17=30
+--wall=
+18=31
+--rock=
+20=46
+--moving-wall=
+21=45
+--magicwalleraser
+24=28
+}
+
+
+ecol={
+3=7
+5=15
+19=1
+7=8
+8=11
+9=9
+22=12
+11=11
+16=4
+17=1
+18=5
+20=6
+21=13
+
+24=2
+}
+
+defline={
+◆=point,vOID,1,1
+⬅️=line,vOID,1,1,2,2
+✽=rect,vOID,vOID,1,1,2,2
+▒=box,vOID,1,1,2,2
+➡️=raster,vOID,1,1,2,2,2,2
+█=add,vOID,vOID,0,0
+●=rect1,vOID,1,1,2,2
+}
+
+defnewline={
+p=point,vOID,1,1
+l=line,vOID,1,1,2,2
+f=rect,vOID,vOID,1,1,2,2
+b=box,vOID,1,1,2,2
+r=raster,vOID,1,1,2,2,2,2
+a=add,vOID,vOID,0,0
+g=rect1,vOID,1,1,2,2
+}
+
+
+header_x2y2={
+line=true
+box=true
+point=true
+rect1=true
+}
+
+blockeheader={
+line=1
+box=1
+point=1
+rect1=1
+raster=1
+rect=2
+add=2
+random=3
+}
+
+coordinateheader={
+line=1
+box=1
+point=1
+rect1=1
+
+rect=2
+raster=1
+
+}
+
+coordinat2eheader={
+
+line=1
+box=1
+rect1=1
+
+rect=2
+
+}
+
+
+kblock={
+"0"=vOID
+"1"=dIRT
+"2"=gEM
+"3"=rOCK
+"4"=wALL
+"5"=wALLGROW
+"6"=mAGICWALL
+"7"=bUTTERFLY
+"8"=fIREFLY
+"9"=aMOEBA
+","=sLIME
+"."=sLIME
+"/"=eRASER
+"*"=mETAL
+0=vOID
+1=dIRT
+2=gEM
+3=rOCK
+4=wALL
+5=wALLGROW
+6=mAGICWALL
+7=bUTTERFLY
+8=fIREFLY
+9=aMOEBA
+10=sLIME
+11=eRASER
+12=mETAL
+vOID=0
+dIRT=1
+gEM=2
+rOCK=3
+wALL=4
+wALLGROW=5
+mAGICWALL=6
+bUTTERFLY=7
+fIREFLY=8
+aMOEBA=9
+sLIME=10
+eRASER=11
+mETAL=12
+}
+
+block2ascii={
+0=" "
+16="."
+17=W
+3=d
+18=w
+21=x
+22=M
+5=P
+19=X
+20=r
+9=C
+7=Q
+8=a
+11=s
+24=k
+
+" "=0
+"."=16
+W=17
+d=3
+w=18
+x=21
+M=22
+P=5
+F=5
+X=19
+r=20
+C=9
+c=9
+B=9
+b=9
+Q=7
+q=7
+o=7
+O=7
+a=8
+s=11
+k=24
+}
+
+keytrans={
+a=A
+b=B
+c=C
+d=D
+e=E
+f=F
+g=G
+h=H
+i=I
+j=J
+k=K
+l=L
+m=M
+n=N
+o=O
+p=P
+q=Q
+r=R
+s=S
+t=T
+u=U
+v=V
+w=W
+x=X
+y=Y
+z=Z
+█=a
+▒=b
+🐱=c
+⬇️=d
+░=e
+✽=f
+●=g
+♥=h
+☉=i
+웃=j
+⌂=k
+⬅️=l
+😐=m
+♪=n
+🅾️=o
+◆=p
+…=q
+➡️=r
+★=s
+⧗=t
+⬆️=u
+ˇ=v
+∧=w
+❎=x
+▤=y
+▥=z
+}
+
+
+headertrans={
+name=nAME
+size=sIZE
+intermission=iNTERMISSION
+needed=nEEDED
+time=tIME
+amoeba_time=aMOEBA TIME
+amoeba_fast=aMOEBA FAST GROW
+amoeba_slow=aMOEBA SLOW GROW
+amoeba_limit=aMOEBA LIMIT
+magicwalltime=mAGIC WALL TIME
+slime_permeability=sLIME PERMEABILITY
+player=pLAYER iN/oUT
+seed=sEED
+random=rANDOM
+point=pOINT
+line=lINE
+rect=fILLED
+rect1=fILLED1
+box=bOX
+raster=rASTER
+add=aDD
+loopx=lOOP x
+loopy=lOOP y
+}
+
+]]
+
+
+
+function _test(fn,i)
+ local c=0
+ while fn(i) and c<15+3 do
+  c+=1
+  i+=1
+ end
+ return c
+end
+
+function cave_compress()
+ local last,i=block_void,0
+ cave.map={}
+
+ while i<gamew2*gameh2 do
+  local w1,w2=0,0
+  
+  c=_test(function(ii) return mget(xy(ii))==last end,i)
+  if (c>w2) w1,w2=flag_last,c
+  c=_test(function(ii) return mget(xy(ii))==mget(xy(ii-gamew2)) end,i)
+  if (c>w2) w1,w2=flag_above,c
+  c=_test(function(ii) return mget(xy(ii))==block_dirt end,i)
+  if (c>w2) w1,w2=flag_dirt,c
+  
+  if w2>2 then
+   add(cave.map,w1)
+   add(cave.map,w2-3)
+   i+=w2
+  else
+   last=mget(xy(i))
+   add(cave.map,block2id[last])
+   i+=1
+  end
+ end
+
+end
+
+
+
+__gfx__
+00f00f000000000000000000000d70000000000000f00f00765e765eaaaaaaaa03bbbb3070000005eddddddddddddddd5555555570007000aaaaa00000500000
+00ffff000000f00000000f00009aa7002222222200ffff00eeeeeee7a999999a3bbbabb3670000d6eccddddd111111115ee55ee567066000a999a00006670000
+0feffef0000fff000000fff00dd66670000000000feffef05eeeeee6a944449abbabbbbbaa70099aeccccccd11c1111156e556e5aa7aa000a949a0009aaa7000
+00ffff0000fffef0000fffef5eeeeee72222222200ffff006eeeeee5a942249abbbbbbbb6667dd66eeeeeeee11111c115555555567066000a999a00006670000
+0fcccc00000fff000000fff0dd6666670000000000cccc007eeeeeeea942249abbbbbbbb00075000dddedddd111111115555555570007000aaaaa00000500000
+000cc0f0000cc0000000cccf099aaa70222222220f0cc0f0eeeeeee7a944449abbbbbbbb66700dd6dddeccddd112111d5ee55ee5000000000000000000000000
+00c0077007cfcc0007cccc0000d667000000000000c00c005eeeeee6a999999a3bbbbbb3a700009accdecccc0d1111d056e556e5000000000000000000000000
+07700000070007700700077000057000222222220770077067e567e5aaaaaaaa03bbbb307000000deeeeeeee00dddd0055555555000000000000000000000000
+444e444455555555e66666665555555500666700ee66666eeddddddd0e000000e11111110fff00000000000203b30000eeeee000444e400055555000eeeee000
+e54445e45ee55ee5e55666665eeeeee506667760e5666666eccddddde7e00000edd111110fff0000220002203bbb3000e11110004544400056565000e6666000
+4444444556e556e5e5555556575555e555666776ee55555eeccccccde77e0000edddddd1fcccf00000202000bbbbb000eddd10004444400055555000e5556000
+44e5454455555555eeeeeeee575555e556676667eeeeeeeeeeeeeeeee777e000eeeeeeee0ccc0000220202203bbb3000eeeee00044e4400056565000eeeee000
+4e44444e55555555666e6666575555e55656676666eee666dddedddde7777e00111e1111770770000002000203b30000111e10004444400055555000666e6000
+44554e445ee55ee5666e5566575555e555666656666e5666dddeccdde777e000111edd1100000000000200020000000000000000000000000000000000000000
+4444444556e556e5556e5555577777e50555655055eee555ccdecccce7ee0000dd1edddd00000000000200020000000000000000000000000000000000000000
+4544544555555555eeeeeeee5555555500555500eeeeeeeeeeeeeeee0e000000eeeeeeee00000000000200020000000000000000000000000000000000000000
+004e44440000444400000044000000000000000000000000444e4400444e000044000000444e4444444e4444444e4444eeeee000eeeee0000676000055555000
+004445e4000045e4000000e4000000000000000000000000e5444500e5440000e5000000e54445e4e54445e4e54445e4edddd000e5555000666760005eee5000
+004444450000444500000045444444450000000000000000444444004444000044000000444444454444444500000000ecccd000eeeee00056666000575e5000
+00e54544000045440000004444e54544000000000000000044e5450044e500004400000044e5454444e5454400000000eeeee000eeeee0005565500057775000
+0044444e0000444e0000004e4e44444e4e44444e000000004e4444004e4400004e0000004e44444e0000000000000000ddded000555e50000555000055555000
+00554e4400004e440000004444554e4444554e440000000044554e00445500004400000044554e44000000000000000000000000000000000000000000000000
+00444445000044450000004544444445444444454444444544444400444400004400000000000000000000000000000000000000000000000000000000000000
+00445445000054450000004545445445454454454544544545445400454400004500000000000000000000000000000000000000000000000000000000000000
+000aa000000a000000000000000000000000000000000000000000000000000000000000000000022000002200000002000000020000000000000000ddddd000
+0aaaaaa0000aa0000000900000000000000000000001100001000010222222222222222222000220022022002200022022000220222222222222222211111000
+0a888aa000aaaa000009900000000000000110000000010000000000000000000000000000202000000200000020200000202000000000000000000011111000
+aa88888a0a888aa000922900000220000010010001000000100000012222222222222222220202200002000022020220220202202222222222222222d111d000
+aa88888a0aa888a0099229000002200000100100000000100000000000000000000000000002000200202000000200020002000200000000000000000ddd0000
+0a8888a00aa8aa000009990000000000000110000010010000000000222222222222222200020002220002200002000200020002222222222222222200000000
+0aa8aaa0000aaa000000000000000000000000000001000001000010000000000000000000020002000000020002000200020002000000000000000000000000
+000aa000000000000000000000000000000000000000000000000000222222222222222200020002000000020002000200020002222222222222222200000000
+00f00f000000000000000000000d70000000000000f00f00765e765eaaaaaaaa03bbbb3070000005eddddddddddddddd5555555570007000aaaaa00000500000
+00ffff000000f00000000f00009aa7002222222200ffff00eeeeeee7a999999a3bbbabb3670000d6eccddddd111111115ee55ee567066000a999a00006670000
+0feffef0000fff000000fff00dd66670000000000feffef05eeeeee6a944449abbabbbbbaa70099aeccccccd11c1111156e556e5aa7aa000a949a0009aaa7000
+00ffff0000fffef0000fffef5eeeeee72222222200ffff006eeeeee5a942249abbbbbbbb6667dd66eeeeeeee11111c115555555567066000a999a00006670000
+0fcccc00000fff000000fff0dd6666670000000000cccc007eeeeeeea942249abbbbbbbb00075000dddedddd111111115555555570007000aaaaa00000500000
+000cc0f0000cc0000000cccf099aaa70222222220f0cc0f0eeeeeee7a944449abbbbbbbb66700dd6dddeccddd112111d5ee55ee5000000000000000000000000
+00c0077007cfcc0007cccc0000d667000000000000c00c005eeeeee6a999999a3bbbbbb3a700009accdecccc0d1111d056e556e5000000000000000000000000
+07700000070007700700077000057000222222220770077067e567e5aaaaaaaa03bbbb307000000deeeeeeee00dddd0055555555000000000000000000000000
+00f00f000000f00000000f00000970000000000000f00f0065e765e79999999903bbb30007000050ddeddddddddddddd55555555070700009999900000700000
+00ffff00000fff000000fff000d667002222222200ffff007eeeeee6944444493bbbbb3006700060ddeccddd1111111155555555060600009444900009aa0000
+0feffef000fffef0000fffef05eeee70000000000feffef0eeeeeee594222249bbbabbb30aa709a0cdeccccc11111111ee55ee550a7a00009424900066667000
+00ffff00000fff000000fff0dd6666672222222200ffff005eeeeeee942aa249bbabbbbb0667dd60eeeeeeee111c11116e556e55060600009444900005570000
+00ccccf0000cc0000000cccf99aaaaa70000000000cccc006eeeeee7942aa2493bbbbbbb00075000deddddddd1211c1155555555070700009999900000700000
+0f0cc000007cf000007cc0000dd66670222222220f0cc0f07eeeeee69422224903bbbbbb06670d60deccdddd0d11111d55555555000000000000000000000000
+07700c000007c0000007c000005ee7000000000000c00c70eeeeeee59444444903bbbbb30a7000a0decccccc00dd11d0ee55ee55000000000000000000000000
+000007700000770000007700000d70002222222207700700567e567e999999990033bb30070000d0eeeeeeee0000dd006e556e55000000000000000000000000
+00f00f000000f00000000f00000d70000000000000f00f005e765e7644444444003bb30000700500ddddeddddddddddde556e556007000004444400000900000
+00ffff00000fff000000fff0005ee7002222222200ffff006eeeeee542222224003bbb3000600600ddddeccd1111111155555555006000004222400006670000
+0ffffff000fffef0000fffef0dd66670000000000ffffff07eeeeeee42aaaa2433bbbbb300a79a00cccdeccc11121c115555555500a0000042a2400055557000
+00ffff00000fff000000fff099aaaaa72222222200ffff00eeeeeee742a99a24bbbbabbb0067d600eeeeeeee11111111e55ee55e006000004222400006670000
+0fcccc00000cc0000000cccfdd6666670000000000cccc005eeeeee642a99a24bbabbbbb00075000ddddddde11c11111e556e556007000004444400000900000
+000cc0f0000fc700000cc70005eeee70222222220f0cc0f06eeeeee542aaaa243bbbbb330067d600ccdddddedd111ddd55555555000000000000000000000000
+00c00770000c7000000c700000d667000000000000c00c707eeeeeee4222222403bbb30000a00a00ccccccde00d11d0055555555000000000000000000000000
+077000000007700000077000000970002222222207700700e567e56744444444003bb30000700d00eeeeeeee000dd000e55ee55e000000000000000000000000
+00f00f000000f00000000f00000570000000000000f00f00e765e765222222220033bb3007000050ddddddeddddddddd55ee55ee070700002222200000700000
+00ffff00000fff000000fff000d667002222222200ffff005eeeeeee2aaaaaa203bbbbb306700d60cdddddec11111111556e556e060600002999200005570000
+0ffffff000fffef0000fffef099aaa70000000000ffffff06eeeeee72a9999a23bbbabbb0aa799a0cccccdec11111111555555550a7a000029a9200066667000
+00ffff00000fff000000fff0dd6666672222222200ffff007eeeeee62a9449a2bbbabbbb0667d660eeeeeeee1c1121c155555555060600002999200009aa0000
+00ccccf0000cc0000000cccf5eeeeee70000000000cccc00eeeeeee52a9449a2bbbbbbb300075000dddddedd1111111155ee55ee070700002222200000700000
+0f0cc000000cfc70000ccc700dd66670222222220f0cc0f05eeeeeee2a9999a2bbbbbbb30667dd60dddddeccd11111dd556e556e000000000000000000000000
+07700c0007c0070007c00700009aa7000000000000c00c006eeeeee72aaaaaa23bbbbb300a7009a0ccccdecc0d111d0055555555000000000000000000000000
+000007700070000000700000000d700022222222077007707e567e562222222203bbb300070000d0eeeeeeee00ddd00055555555000000000000000000000000
+0896e44525fc8261c0c0c0c0c069e66482e1e1c304808c0230206201a0b0c0d0e000c3412330900000421070e1704290e062e00090528052716190b1e002b260
+e00190a17101e033e0b080427170d06121f2316180b18061d05280c081c0000827f4f4d43d8261a0c090d0a069e6646464e1c304808c02213121413000107585
+00c341233090702042106062604210d062d04280108041420110014142811081414202100241021030623002109062900210016201024110414100a0703142d0
+b0e050e2217031f7e0d04272a2801190838160e0f290c080c080e0a18042801090a13151d033809043e061d0b194608060d00008d614a55c8261817181715169
+46a50564e1c304808c0230207221002363437321464123309000000080b0d09011c11121c0d0c0d0c021b0d0519060e001906061d0c0801190c090c021b18160
+e0b09060e050c0806080e060e06090f1e0709060c3d0608060d0119080c05060720190d0b190c0d0c0d0b1900221707170801121c071c031a1e001217021c060
+e060900131c090b190c081709070b070e0b071b09070d1c081c00171b0c170d070d0c02160d0c0000826554545542564c494543d82619021b14242874605c323
+e1c304808c021010624100e6073777414100000000000013008080b0b01300018031b013008180b1b01300028032b081a09081219081a1908122900011537080
+523110227db041c0216080c080b08070d0c0e0806671617100286614c4c494e4740246f475ec01016060606060a0a0a0a0a0e1c304808c023070e0e000102030
+400000000000000000070000010181a0e071a06011a07000a052a5c0625102000876551425443d826140506070806987a5c382e1c304808c0210107241001020
+3040000000000000000003008080a0a00300018021a003008180a1a00300028022a0030080e0a001030001e02101030081e0a101030002e022013190a03111a0
+3191a03112a031900131110131910131120191a08091218091a18091228091a0e09121e091a1e09122e000a0a3a2908070b0f26090d280c0b0a2902380c0b0a2
+902380c0b0b1b27000086694255464c495024654e43d82614060708080698746a505e1c304808c02302162210041516171412300000000000043001010a04043
+001040a07043001070a0a0430010a0a0d04300d11062404300d14062704300d17062a04300d1a062d012a010a0d012d110d1d03130303130603130903130c031
+42303142603142903142c09140309140609140909140c09132309132609132909132c0006190612170e0c0d0e0c0e0b080a190b1e0518061a170e06122b0c1b0
+a01131b09061e0519061e0518061e0519061b04401e1a411a3339052e042905231518001905290f0904290d4b270d0c0d0c021708002e0a2d0000816d4f45424
+1c8261f0419191918787878787e1b404808c0241107250207080a0900046418270200000421050c05042c1306230a2313141313140403140c031404131222031
+22a0312241000180601270c160d060802060717080206090603180c0907060e0b1d0e06080f102608090c080a170608090c080016151c0906090b08090c09060
+90702161d0b0c0b0ffffff466080b03060306030603060306030b030a09040703090c0d0703090a290c0811160e0c081119070000856e4348414e44554440277
+14c4cc8261a0f041414187e646a50541c304808c0241100030103040506000a5412370200000421050c0504210d0c0d042c130623042c1b062b052e0f051f012
+e0d051d03140403122203122a031c0e031310101e0010012014130c060806012601190c080e00180e070906031609080c031c1117161217480f2e261a18031b0
+c0d060800181c0d1a170e0112292d070e0a1d060002846941474f4e414cc0101c0c0c0c0c0a0a0a0a0a0e1c304808c021050e050001020304000000000000000
+0023111010e030231110c0e0e072104070a07280a0e04072107050b072a0b0e07032106060b03290b0e060922040709000508070807080708070807080119070
+9070907090709070900008762554544c8261b4b40555a56969282887e1c304808c0280a070a04698c8bf33410f30870000000043005080114111c08043009180
+524111f180421101910102111191110061311050205010c161c111806011907080708051c0806080e01180517080c080b0c031021370e080c0ffc8c111c160e0
+6090b090609060d0c0806080303101d060d060316172b120a090604120f0e060e0c0d0c0304221b03140b03031b0c021c0d0c003c0d060226022019001308030
+90b0e06080c0b0e0b0c1b0e0b080e0b09011d070d0905121c00180011171b0d0607130b0307260000847251434b43d8261c0c0c0c0c0692887e646e1c304808c
+02d010724100102030400000000000000000325020512132512050210370509051b0441020512101d020447040310101d04044906011e001d06044b080f0c001
+d0804370304050210140403240e04011001222f22661e05195e2d052c1d142e0f2e40271c0811492f4e271b1d0508031a181f294904312c022e1d354e2121180
+900122f2a3c0e0d2b013e2d09210a2e0f2626171a2e0f1e002e0d3228311d060d0e294a4f2d0a1b1d0010212f1022201907090b153334363a1e052947484a442
+e0f7267000083625f4754c82616060606060878769690fe1c304808c02412162f00040667946004641057020000042a010a090424110419042e110e190429041
+90c042c0d0c1d0425090d09042f0907190429190129042c111627031401031e01031811031221031404131323100d0709060e06121c0906120609070b01190c0
+906121e0c021c0e060d160e0708160e0b08171c053a1d0018033904290b031d07090b01180c080b090709001e060e0608060c1b0710190206022709060906180
+6080c03101c2039372b031706021c012c08030e06011d0c03111d011900190b0d0c0b0e0c080c09011d061306090b09070e2b1601353f2809001b19011127000
+0826c414354502458425f455748c82613131e001514baa0a0a69e1c304808c023021724100c320b36600c341233090000042a030a04142e030e0414221302141
+4261306141422040c040422080c0804220c001c0422001c0011300e12012509102301300e17012a09102801300e1c012f09102d000f0609060728070f0608170
+326062709060635290b08070b0e0b1d09052b211c21171606270d070d0b03170d0708160227060e07060e0b17170217080703160e060906090d061a070a181a1
+216090f57023a351126090c0d0d160d06031c090110402d0112170f03060310190b09051f30180b0900570f07060710110316070216181c05402d070d0a28011
+d160b260d0b09061c170d00121b031b02160d0b0c031a221700028e6f4020716ce0101a0a0a0a0a04141414141e1c304808c023010e080001020304000ff0000
+000000003210e0a0e09370b0c0e0e00044c05181117161f131112102f113f22100081605f43414c49505355c82612373c364050ab96919c8e1c304808c022110
+a01000102030404182000000000000a14110425001220182501122117250212221145031224100a3a290c0d0b19074c0b090346090d3909360903390f2b09070
+92905260315111b26080118002c170312170e0d0709070d060708070e071b040c0013780c9e0607252e011908070e0c021f21442d29002304160306030603060
+306073b130b030603060305170f0f2d090e290b0118011809001806070e0b080d160905131010008a7947402a7147c8261e13282a2d26919c87828e1c304808c
+023010722143161b234000000000000000001300a080614182b090614114c080e0411401802141144180614172616012609261501250147140917014b140d170
+14f140127000b026c095c08561e0b0e0c0e0b0e0c0e0b0e0c0e0b0e0c031a1ca80d880e8d0519011d0c05180618831c0d06090119060d0c0e0c0d06031c02170
+81d471b0114101e060d0a06011f001e060d0f0601141b090609060d0a06011f001e060d06011a001e060d0f06011f001e0603260d0c080479390c080f661e0f2
+90ff2d21f69390c080f69390c080f631432d1182c0d0b080f6708082d343b270803390a2d042438033e0609060d070800231c0b0816612c000086655e4e454cc
+8261f0414191e187878787c880c304808c024110414110d1e1f1020046410570200000422020b0b042f0b0812012c0c0e0c052c0d0e0d0008011e001d0703060
+908030d0b081c08051e012b0907060902170d0b08070b09060706090119001118160906070e070d070d07021c03151c0d151806090805190b011d01180e07001
+d060e06190d4c1b003c0d0c0906090b090b0c06090a180b0c1608030e060e070d070e001e070d07090b070b0d0b1b0d031b080b0c16190609080b09070906090
+60e071b08102513161d0c019a1806180a180b1608001c0807031216031b1d0c021000856e4348414e44554440226f485543d8261c0f0f0f0c0696969696941c3
+04808c0210107220108718e7b7412300000000000013008011b04191a021447080c0f0527080c08013000111314191212144f08041f052f080418013008111b1
+4191a12113000211324191222100b211b26190b0115080b0e06072b0a0c021c0d011e00131117101818070800171c0d0c080708002907090118070d060c08680
+c0a0b080a19011805170d16090b0217090d0c0d05170d1b0707111c2a1703170d0c09060e0b08060806080d1c0d09060900180616080e060d0608002517021b0
+90018070e001d07060d160c02131518061b080b10190b0d0c090b0c08011609001804360e025d070215191b09060804232c081a180616021116080708011e001
+e060d06080b1d01190f280b00290b153608060c0d09060e070e00190019011d0c0d0b080d3906031c08070e0118060806080b090b071d431c0c25253c0c27090
+70d161d070002846f45524c45402d61474943c01016060606060414141414130c304808c024010a090654fe45899000000000000000074c010e0200300c050e0
+a052c050e05052c090e090729060b080000352e080b0e0c0e080607080e0b090b0c1a251e011b0e011b0715201e0c0b0d0b1221190512170a01121b0c001d070
+d0609000087754c434f4d45402241434bc8261a0a0a041410f0a87464691c304808c0252305021b0c0d0e0f0412330000000000042311031b04210b031b01230
+60016052307001701230a001a02212101201714150130151100201221201e0010300f01162419501114010601015211140406010556110603020205571103030
+40205561203010401051c1405102405161401271508150008001c1c090c08010b07053b080b5e0d00190b030d1c0d0c0907090c0d081c001d15a61c101800180
+608060c0e0b1d002720182a170217031602101a090801590d49015e084908381c0d04390d0e051c0900180018051b18052c190b08090018090b0805190518090
+c080901180c090f271e2c1a100083794c4f43d8261b40555a5f58ceb4baa0ae19104808c02300162014698c8bf3341ef80f7000000002210f0e1f00300100162
+412311100070f02311b00011f023115100b1f02311f10062f07590e03010a0101590f03010a01072101062101210206220121030623004201030f004421052f0
+__gff__
+00000007000001010101010100000000011105150f0101000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+__map__
+00450709020649a74a010806fffffff5a6090c0d3e0334033444240e0833090833090810ff060d0c06080b0e1b090c08070807080c08070e0c08090c0e060806080c0e061b030708111709060906090609066100807350495241cc2816100c120f0f96969696c81e194008c8202503120a182d341e2800781432070f03092207
+042604220704070f22071020102220102009220e082008220e080e0c220e0c190c0009290806134203110d0910091f0d0608290e06071c060d111709150721060e0708070d1608110911080616090b090c1a08100907120b131b1201090c080e0c0210080616021a0e1b08160e0c08390e070e110b0c13070b1213062c38083d
+0d0b0d0b1c160e4d08070618330080625245414b5448524f5547c82816323436383a50463c32281e8c4008c820130b010a182d341e2800000000000000002905020e02170f022905050e05170f052905080e08170f084a1601171424150a1514331018012614000e0c0906130718062b1a0810a0240e4d0b271b21074948636a
+215112008270524953494fce1010010101010119191919191e3c4008c8200303020a2523d01ce30000000000000000370705020b08130806002b11130d10173e131f01091f008073484f5745d2151605080a0a0a1e1e1e1e1e013c4008c820031114111e1f20212214ff037f000000003000010713145b0105130301022b0112
+1312260114131400060f16100c0e110d25060e11080609160d0f07040700806741554e544c45d428161e2820202ac8c8c8c8c81e3c4008c820010202050a0b0c0d0e14dc03500000000041010126143112010a260c311001010f14240e020e13241a021a13300004010814220302031422090109135205030306010359060201
+030106590607010301060009112b0f120f120f1c750e07040d2531100e0b0809100d070215090713391806130608221e071710031113150d06010c0e1009100d130708160b0d070d0e0b0910070d130b08060d060305010e386206190613080a130a130f130f130f1d1f1700806a4149cc2816080e0f0f0cc8b4b496961e3c40
+08c820090b0c0b0a0b0f0d0e00781432070f030954020209050404540302090504046914000134000b04170d270b051905210b061906540b050508030100060e0708060924170226111820080702131b081609110d1b0d1d070910090c170b090c130b090b09061d0c19060d06070907021509ff5a0c080c1207081109111207
+06130d10270706090c0b1224081013690c0d43120708090706072d021f0e29081a1d550c0f0b1c10008072494e472041524f554e44204120524f53d928161e28323c46c8a07864501e784008c82001011304971ef695ce00000000000000004002020d0a58040a05010201580d030104010258040205010201241401140f2a19
+0122014001010e0b006416260339261f2f0d201239680d330e064e221b18870e1407230c190e16170b0d0c09060d070b080c063059150c080b08073a1f4010120c06440c180b12290e0745070082634952434cc51010040404040419140f0f0f1e3c4008c82001020e0a9cf908fe880000000000000000300303030505300308
+030a05300303070509300308070a09190503190a03180307180807000939171a05060f060515170c0511190c0a200800806641535420545241434bd328164b4b4b4b4ba08c7864501e3c4008c820260d010d461ba586360000000000000000300001012614530302110502045104021105020452030322050104400c010d0840
+1c011d0859040101050104591401010501045924010105010430001109161422130a131353140a0105010251140b01050102191309001351210b221b10172a33305c0e511843240e200d16401a050b05970d0c0b17390e2e160e1b101b0d3e1a0e0c0d437912110d07420e200d2a17470c0e390f0721470e4809060951090080
+6d4958454420444f55424c45d32816121b242d36c8b4a08c781e3c4008c820070a1e0f0102030405140100000000000059030304020709580403040207095703040402070957040404020709000d06011c10180b11080b080c080609250d1122012110180b1307210c090612071070180080734e414bc52816151813171b3c3c
+3c3c3c023c4008c8200a0323120a0b0c0d0f030f000000000000410101261429010119012101022602170a02340009030b052109030b03631600010010120c0d0b0d0b0910120c211108071d2a082017250e0b130b0e1f131f22251734080c181b260b080609100d0c080c170080675249444c4f43cb28162324212522f0dcc8
+aa961e3c4008c820150325060c0807090b145a03140000000054010624030106540601061206015003060603060650060306030606212601261421011426140006090c09080608070b08090c0810091b0816090d0b1c20090709100c180c0809115806130c0d130631070e0609080735100d0e07100e06070b1c0e0c0e06180d
+1a120b170b08070811091a090b030e1008160b170b0e070e0718070b0e1207170b0d0c1710090c150807150907330839091b08060d0920150e06180d0c09150d0e1106130d1a0e0b0d0c170b080e060907080b0c270710080c1c1a0e060c1206120c0b090607091b0d0c060d1f0105032f33200e060e1a310c0f0b0e07130708
+0c0d110f070b07090c090c0e0c060d06170c0e0c0d0e3417110d110816090c130082735452495045d3101002020202021e191414141e3c4008c82001020e07a3475e7ae40000000000000000700000101029090e0d0a2903020807510201070e0201130a07130c07004309191c06080b01110080634f4d42494e4154494fce28
+160014142832c8c8c8c8b41e3c4008c8ff0213020d898c64fb3314ff037f0000000037140110261452020113090202510202130902022b011226124101132614412501261400013e03070307031b0311030703073211030c03251d102c0c35ab13060080745245c528161515151515c8b4a08c781e3c4008c820141114130f10
+111213143c0000000000004001012614410202250d70010e261459020e09010201590114130102013100130e151453050207030504000807120b1d110d06130b07130811060d161d06080626061213151222152c1a171a2c661718341c07170b18150c12060d0b0815071207171d292d130c0f0d321c060d0080634f434f4f4e
+d328162424242424c896857d780a3c4008c820031226031bfcb16bb8000000000000000031000306090c18040817060534100c06120f240c101210700d07110b210d0611065c0c0604010201180d08110f07170f067013081c10310015091b0f2414091b0918160b17180117180331001e06240c181f08171e07251e0c240c25
+1e0d240d0011860b26160810080c06171613073b0c1c0c17310b1705110d0b09070d1d0c180c1c0c0b0e160907180c0b0e0c210b0d060d07080616081a520b0e07130c0613070609060726292c251a08730b0c17100d0b080c060d2c341d00807350454c554e4b494ec72816140f110f14c8c8c8c8c81e3c4008c8200302140b
+0a0b0c0d0e00bd14b3031300004101012614000939120708182508095262290907060806090609041109020c0e46071e010f09020f0609140c0b1406070f0e0f070f060910010c090706090d0b0e0f0806070e0609100e075a080b030c091009080c0e37080b183d1c0603060e06080b03182462201e09011408111409071909
+15090b08090c060e0806190c0e080b4b080607090709070e08060e07091e1509080e0b1707063b70120608102100827249474854204f4e452053504143c51010010101010114141414141e3c4008c82002010b09ec42dcf9b9000000000000000030140605080730030a020c04190c02490a080c0a220c080c0a00302002060e
+10181b0d0c090a09070d0c1c100e000000090a09070d0c1c100e000000302002060e10181b0d0c090a09070d0c1c100e0000001010101010101010101010101013101010101010101010101010101010101010101010101010101010101010101310101010101010101010101010101010101010101010101010101010101010
+1310101010101010101010101010101010101010101010101010101010101010131010101010101010101010101010101010101010101010101010101010101013101010101010101010101010101010101010101010101010101010101010101310101010101010101010101010101010101010101010101010101010101010
+1310101010101010101010101010101010101010101010101010101010101010131010101010101010101010101010101010101010101010101010101010101013101010101010101010101010101010101010101010101010101010101010101310101010101010101010101010101010101010101010101010101010101010
+1310101010101010101010101010101010101010101010101010101010101010131010101010101010101010101010101010101010101010101010101010101013101010101010101010101010101010101010101010101010101010101010101310101010101010101010101010101010101010101010101010101010101010
+1310101010101010101010101010101010101010101010101010101010101010131010101010101010101010101010101010101010101010101010101010101013101010101010101010101010101010101010101010101010101010101010101310101010101010101010101010101010101010101010101010101010101010
+1310101010101010101010101010101010101010101010101010101010101010131010101010101010101010101010101010101010101010101010101010101013101010101010101010101010101010101010101010101010101010101010101310101010101010101010101010101010101010101010101010101010101010
+1310101010101010101010101010101010101010101010101010101010101010131010101010101010101010101010101010101010101010101010101010101013101010101010101010101010101010101010101010101010101010101010101310101010101010101010101010101010101010101010101010101010101010
+1310101010101010101010101010101010101010101010101010101010101010131010101010101010101010101010101010101010101010101010101010101013101010101010101010101010101010101010101010101010101010101010101310101010101010101010101010101010101010101010101010101010101010
+1310101010101010101010101010101010101010101010101010101010101010131010101010101010101010101010101010101010101010101010101010101013101010101010101010101010101010101010101010101010101010101010101310101010101010101010101010101010101010101010101010101010101010
+1310101010101010101010101010101010101010101010101010101010101010131010101010101010101010101010101010101010101010101010101010101013101010101010101010101010101010101010101010101010101010101010101310101010101010101010101010101010101010101010101010101010101010
+__sfx__
+4a0600001c67120661186510000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+140800003f75500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+480200003f6703f6703a67036670346702c6701d670016700e6500e6500e6500e6400e6400e6300e6300e6300e6300e6300e6300e6300e6300d6300d6200d6200d6200c6200c6200c6200c6100d6100c6100d600
+18020800335772f577245771957704000040000400004000040000400004000040000400004000040000400004000040000400004000040000400004000040000400004000040000400004000040000400004000
+020800002a6352a6051d6351d60512605000050000500005000050000500005000050000500005000050000500005000050000500005000050000500005000050000500005000050000500005000050000000000
+780508000317206172081720a1720a1720a1720020000201002010020100201002010020100201002010020100201002010020100201002010020100201002010020100201002010020100201002010020100201
+7a0709003e6313c651376613264127621000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+7a0709002663131651376613c6413f621000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+160303000575101721000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+b00a0020045460754609546025460b5460454605546005460954602546045460554608546055460b54602546075460054606546045460754609546025460b54604546055460254609546045460b5460054607546
+400a0010210221d02218022150221f0221b0221602215022210221d02218022150221f0221b022160221502200000000000000000000000000000000000000000000000000000000000000000000000000000000
+010f00000c5750c515000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+010f00001057510515000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+31110000105751051500000000000c5550c51500000000000854208512000000000004532045120000000000015120151200000000000c5050c5050000000000105051050500000000000c5050c5050000000000
+7a0900203b7253e72531725377253a725377253c725377253f72536725357253f725397253172535725397253d725337253b7253172532725337253b7253e725367253b7253d725357253e7253a7253572535725
+0008000011151181511d1512014500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+480200001d6712c6712566122661206611b651166310f621000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00140000110552d055110552e0551d0552d055110552e0550f0552d0550e0552e0551a0552b0550e0552c0552905524055210551d05527055220551f0550e055300552d0552905524055220551f0551b0550e055
+00140000291552915529155291552915529155291552915529155291552915529155271552615526155261552d1552915524155211552b15527155221551a1552d1552915524155211552b15527155221551a155
+00140000110552d055110552e0551d0552d055110552e0550f0552d0550e0552e0551a0552b0550e0552c055110551105511055300551d0551d055110552c0550f0550e0550e0550e0551a0551a0550e0550e055
+0014000029155291552915529155291552915529155291552915529155291552915527155261552615526155291553515529155331552915532155291553015527155321552615532155261552e1552615532155
+001400000f0550e0550e0550e055170551705517055170550c055240550c055240550a055090551105511055110551105511055110551d0551d05511055110550f0550e0550e0550e0551a0551a0550e0550e055
+001400001b15526155161551d1552315532155261552315518155281551a1552915522155211552d1552115529155291552915529155291552915529155291552915529155291552915529155291552915529155
+0014000011055180551d055200550f0551a0551b055220550d0550c055180550c0551b0552e0551c0552c055110551105511055110550f0550e0550e0550e0551105511055110551105519055180551805518055
+011400001d1552115524155291551f15522155241552b1552515527155291552c155261553215528155301551d15529155181551f1551b1552b1551f1551a1551d15529155181551f15525155351552915524155
+__music__
+01 3f3e7f7f
+00 3d3c7f7f
+00 3b3a7f7f
+02 39387f7f
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+00 40404040
+
+__meta:4f78820c-0dc1-11ed-861d-0242ac120002__
+@5f10
+000102030405060708090a0b0c0d810f
+__meta:1bdaec14-d23c-4c68-9cbb-45d80342eabf__
+{
+	["SFXname"] = {
+	},
+}
